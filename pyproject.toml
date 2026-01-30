@@ -43,6 +43,10 @@ all = [
     "openai>=1.0.0",
     "sentence-transformers>=2.2.0",
 ]
+sync = [
+    "cryptography>=41.0.0",
+    "gitpython>=3.1.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

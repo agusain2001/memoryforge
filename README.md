@@ -1,6 +1,6 @@
-# MemoryForge
+# MemoryForge v2
 
-**Simple, practical memory for AI coding assistants**
+**Intelligent, team-aware memory for AI coding assistants.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)]()
@@ -10,14 +10,15 @@
 ## What Is This?
 
 MemoryForge is a **local-first memory layer** for AI coding assistants like Claude, GPT, and Cursor.
+It enables your AI to "remember" project details across sessions and conversations.
 
-It remembers your:
-- ✅ Tech stack and frameworks
-- ✅ Architecture decisions and why you made them
-- ✅ Code conventions and preferences
-- ✅ Constraints and past learnings
-
-**No more re-explaining your project every conversation.**
+**Key Features:**
+- ✅ **Tech Stack & Decisions**: Remembers architecture, constraints, and why decisions were made.
+- ✅ **Multi-Project Support (v2)**: Isolates memories per project.
+- ✅ **Git Integration (v2)**: Links memories to commits and scans for architectural changes.
+- ✅ **Memory Consolidation (v2)**: Merges similar memories to keep context clean.
+- ✅ **Team Sync (v2.1)**: Secure, encrypted synchronization for teams.
+- ✅ **Local privacy**: All data stored locally in SQLite and Qdrant.
 
 ---
 
@@ -29,11 +30,8 @@ It remembers your:
 # Install with local embeddings (FREE, recommended)
 pip install -e ".[local]"
 
-# OR with OpenAI embeddings (paid, higher quality)
-pip install -e ".[openai]"
-
-# OR install both
-pip install -e ".[all]"
+# Install with Team Sync support
+pip install -e ".[local,sync]"
 ```
 
 ### Initialize
@@ -41,127 +39,141 @@ pip install -e ".[all]"
 ```bash
 cd your-project
 
-# Use local embeddings (default, FREE)
+# Initialize MemoryForge for this project
 memoryforge init
-
-# Or use OpenAI embeddings
-memoryforge init --provider openai
 ```
 
-### Add Memories
+### Basic Usage
 
 ```bash
+# Add a memory
 memoryforge add "We use FastAPI with Pydantic v2" --type stack
-memoryforge add "No Redis - too complex for deployment" --type decision
-```
 
-### Search Memories
-
-```bash
+# Search memories
 memoryforge search "What backend framework?"
+
+# View recent memory timeline
+memoryforge timeline
+
+# List memories
+memoryforge list
 ```
 
-### Start MCP Server
+### Project Management (v2)
 
 ```bash
-memoryforge serve
+# Check status
+memoryforge status
+
+# Switch projects
+memoryforge project switch <project_id>
+
+# list projects
+memoryforge project list
 ```
 
-Add to your Claude Desktop config:
-```json
-{
-  "mcpServers": {
-    "memoryforge": {
-      "command": "memoryforge",
-      "args": ["serve"]
-    }
-  }
-}
+### Team Sync (v2.1)
+
+Securely share memories using any shared folder (Dropbox, Git repo, Network drive).
+
+```bash
+# 1. Initialize Sync (generates encryption key)
+memoryforge sync init --path /path/to/shared/folder
+
+# 2. Push local memories
+memoryforge sync push
+
+# 3. Pull team updates
+memoryforge sync pull
 ```
 
----
+**Security**: All shared data is encrypted with AES-256 (Fernet). Share the generated key securely with your team.
 
-## Embedding Providers
+### Git Integration (v2)
 
-| Provider | Cost | Quality | Setup |
-|----------|------|---------|-------|
-| **local** (default) | 🟢 FREE | Good | `pip install memoryforge[local]` |
-| **openai** | 💰 $0.02/1M tokens | Best | API key required |
+Enable in `config.yaml`: `enable_git_integration: true`
 
-### Local Embeddings (sentence-transformers)
-- **100% free** - no API costs
-- Works **offline**
-- Model: `all-MiniLM-L6-v2` (384 dimensions)
-- First load downloads ~90MB
+```bash
+# View git integration status
+memoryforge git status
 
-### OpenAI Embeddings
-- Higher quality for nuanced queries
-- Model: `text-embedding-3-small` (1536 dimensions)
-- Requires API key
+# Scan for architectural commits
+memoryforge git sync
 
----
+# Link a memory to a specific commit
+memoryforge git link <memory_id> <commit_sha>
+```
 
-## CLI Commands
+### Memory Consolidation (v2)
 
-| Command | Description |
-|---------|-------------|
-| `memoryforge init` | Initialize for current project |
-| `memoryforge add "content" --type TYPE` | Add a memory |
-| `memoryforge list` | List all memories |
-| `memoryforge search "query"` | Semantic search |
-| `memoryforge delete ID` | Delete a memory |
-| `memoryforge confirm ID` | Confirm pending memory |
-| `memoryforge serve` | Start MCP server |
+Keep your memory bank clean by merging duplicates.
 
-### Memory Types
+```bash
+# Suggest consolidations
+memoryforge consolidate suggest
 
-- `stack` - Tech stack (languages, frameworks)
-- `decision` - Architecture decisions
-- `constraint` - Limitations and constraints
-- `convention` - Code conventions
-- `note` - General notes
+# Apply consolidation
+memoryforge consolidate apply <id1> <id2> --content "Merged content..."
+
+# Undo consolidation
+memoryforge consolidate rollback <consolidated_id>
+```
+
+### Maintenance
+
+```bash
+# Find stale/unused memories
+memoryforge stale unused --days 30
+
+# Migrate database schema (v1 -> v2)
+memoryforge migrate
+```
 
 ---
 
 ## Configuration
 
-Config file: `~/.memoryforge/config.yaml`
+Config file: `~/.memoryforge/config.yaml` or project-local `.memoryforge/config.yaml`.
 
 ```yaml
-project_name: "my-project"
-embedding_provider: "local"  # or "openai"
+# v2 Configuration
+active_project_id: "..."  # Managed automatically
+consolidation_threshold: 0.90
+enable_git_integration: true
 
-# Local embedding settings
+# v2.1 Sync Settings
+sync_path: "/path/to/shared"
+sync_backend: "local"
+
+# Embedding settings
+embedding_provider: "local"
 local_embedding_model: "all-MiniLM-L6-v2"
-
-# OpenAI settings (only needed if provider = openai)
-openai_api_key: "sk-..."
-openai_embedding_model: "text-embedding-3-small"
-
-# Retrieval settings
-max_results: 5
-min_score: 0.5
 ```
+
+---
+
+## Architecture
+
+MemoryForge uses a dual-storage approach:
+1. **SQLite**: Relational data, project metadata, version history.
+2. **Qdrant**: Vector storage for semantic search.
+
+Embeddings are generated locally (via `sentence-transformers`) or via OpenAI API.
 
 ---
 
 ## Development
 
 ```bash
-# Install with dev dependencies
-pip install -e ".[dev,local]"
+# Install dev dependencies
+pip install -e ".[dev,local,sync]"
 
 # Run tests
 python -m pytest tests/ -v
 
 # Type checking
 mypy memoryforge/
-
-# Linting
-ruff check memoryforge/
 ```
-
----
 
 ## License
 

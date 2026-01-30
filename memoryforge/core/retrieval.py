@@ -16,7 +16,7 @@ from uuid import UUID
 from memoryforge.models import Memory, MemoryType, SearchResult
 from memoryforge.storage.sqlite_db import SQLiteDatabase
 from memoryforge.storage.qdrant_store import QdrantStore
-from memoryforge.core.embedding_service import EmbeddingService
+from memoryforge.core.embedding_factory import EmbeddingServiceProtocol as EmbeddingService
 from memoryforge.core.validation import ValidationLayer
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,8 @@ class RetrievalEngine:
             results = []
             for vr in vector_results:
                 memory = self.db.get_memory(UUID(vr["memory_id"]))
-                if memory and memory.confirmed:
+                # v2: Skip archived memories
+                if memory and memory.confirmed and not memory.is_archived:
                     results.append({
                         "memory": memory,
                         "score": vr["score"],
@@ -109,6 +110,13 @@ class RetrievalEngine:
             
             # Limit final results
             results = results[:limit]
+            
+            # v2: Update last_accessed for retrieved memories (staleness tracking)
+            for r in results:
+                try:
+                    self.db.update_last_accessed(r["memory"].id)
+                except Exception as e:
+                    logger.debug(f"Failed to update last_accessed: {e}")
             
             # Build search results with explanations
             search_results = []
@@ -131,6 +139,18 @@ class RetrievalEngine:
             logger.error(f"Search failed: {e}")
             # Fallback to keyword search in SQLite
             return self._fallback_keyword_search(query, memory_type, limit)
+
+    def get_timeline(self, limit: int = 20) -> List[Memory]:
+        """
+        Get memories in chronological order (most recent first).
+        
+        Args:
+            limit: Maximum number of memories to return
+            
+        Returns:
+            List of memories sorted by creation date (desc)
+        """
+        return self.db.get_recent_memories(self.project_id, limit)
     
     def _normalize_query(self, query: str) -> str:
         """Normalize a search query."""

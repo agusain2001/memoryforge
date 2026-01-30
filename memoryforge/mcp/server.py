@@ -6,6 +6,11 @@ Provides MCP-compliant tools for AI assistants to interact with memory:
 - search_memory: Semantic search for relevant memories
 - list_memory: List all stored memories
 - delete_memory: Remove a memory by ID
+
+v2 Tools:
+- list_projects: List all available projects
+- switch_project: Switch to a different project
+- project_status: Get current project status
 """
 
 import asyncio
@@ -28,6 +33,7 @@ from memoryforge.core.embedding_factory import create_embedding_service, get_emb
 from memoryforge.core.memory_manager import MemoryManager
 from memoryforge.core.retrieval import RetrievalEngine
 from memoryforge.core.validation import ValidationError
+from memoryforge.core.project_router import ProjectRouter
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +57,17 @@ def create_mcp_server(config: Config, project_id: UUID) -> Server:
     
     # Initialize storage and services
     sqlite_db = SQLiteDatabase(config.sqlite_path)
-    qdrant_store = QdrantStore(config.qdrant_path, embedding_dimension=embedding_dim)
+    
+    # v2: Per-project Qdrant collection
+    qdrant_store = QdrantStore(
+        config.qdrant_path,
+        project_id=project_id,
+        embedding_dimension=embedding_dim,
+    )
     embedding_service = create_embedding_service(config)
+    
+    # v2: Initialize project router
+    project_router = ProjectRouter(sqlite_db, config)
     
     # Initialize core components
     memory_manager = MemoryManager(
@@ -170,6 +185,59 @@ def create_mcp_server(config: Config, project_id: UUID) -> Server:
                     "required": ["memory_id"],
                 },
             ),
+            Tool(
+                name="memory_timeline",
+                description="Get a chronological view of recent memories.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of memories to show (default: 20)",
+                        },
+                    },
+                },
+            ),
+            # v2 Project Management Tools
+            Tool(
+                name="list_projects",
+                description=(
+                    "List all available projects in MemoryForge. "
+                    "Shows project names, IDs, memory counts, and which is active."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="switch_project",
+                description=(
+                    "Switch to a different project. "
+                    "All subsequent memory operations will use the new project."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "name_or_id": {
+                            "type": "string",
+                            "description": "Project name or UUID to switch to",
+                        },
+                    },
+                    "required": ["name_or_id"],
+                },
+            ),
+            Tool(
+                name="project_status",
+                description=(
+                    "Get the current project status. "
+                    "Shows active project info, memory counts, and configuration."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
         ]
     
     @server.call_tool()
@@ -184,6 +252,15 @@ def create_mcp_server(config: Config, project_id: UUID) -> Server:
                 return await _handle_list_memory(memory_manager, arguments)
             elif name == "delete_memory":
                 return await _handle_delete_memory(memory_manager, arguments)
+            elif name == "memory_timeline":
+                return await _handle_memory_timeline(retrieval_engine, arguments)
+            # v2 project tools
+            elif name == "list_projects":
+                return await _handle_list_projects(project_router, sqlite_db)
+            elif name == "switch_project":
+                return await _handle_switch_project(project_router, arguments)
+            elif name == "project_status":
+                return await _handle_project_status(project_router, config)
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
         except ValidationError as e:
@@ -339,6 +416,145 @@ async def _handle_delete_memory(
         return [TextContent(type="text", text=f"Memory {memory_id} deleted.")]
     else:
         return [TextContent(type="text", text=f"Memory {memory_id} not found.")]
+
+
+async def _handle_memory_timeline(
+    retrieval_engine: RetrievalEngine,
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    """Handle memory_timeline tool call."""
+    limit = min(arguments.get("limit", 20), 100)
+    
+    # Get timeline
+    loop = asyncio.get_event_loop()
+    memories = await loop.run_in_executor(
+        None,
+        lambda: retrieval_engine.get_timeline(limit=limit),
+    )
+    
+    if not memories:
+        return [TextContent(type="text", text="No memories found.")]
+    
+    lines = [f"Memory Timeline ({len(memories)} most recent):\n"]
+    
+    for memory in memories:
+        date_str = memory.created_at.strftime("%Y-%m-%d %H:%M")
+        lines.append(f"[{date_str}] {memory.type.value.upper()}")
+        lines.append(f"ID: {memory.id}")
+        lines.append(f"Content: {memory.content[:100]}{'...' if len(memory.content) > 100 else ''}")
+        lines.append("")
+        
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+# ============================================================================
+# v2 Project Tool Handlers
+# ============================================================================
+
+async def _handle_list_projects(
+    project_router: ProjectRouter,
+    sqlite_db: SQLiteDatabase,
+) -> list[TextContent]:
+    """Handle list_projects tool call."""
+    loop = asyncio.get_event_loop()
+    
+    projects = await loop.run_in_executor(None, project_router.list_projects)
+    
+    if not projects:
+        return [TextContent(type="text", text="No projects found. Run 'memoryforge init' first.")]
+    
+    active_id = project_router.config.active_project_id
+    
+    lines = [f"Projects ({len(projects)}):\n"]
+    for proj in projects:
+        is_active = "→ " if str(proj.id) == active_id else "  "
+        memory_count = await loop.run_in_executor(
+            None,
+            lambda p=proj: sqlite_db.get_memory_count(p.id, confirmed_only=True),
+        )
+        lines.append(f"{is_active}{proj.name}")
+        lines.append(f"   ID: {str(proj.id)[:8]}... | Memories: {memory_count}")
+        lines.append("")
+    
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def _handle_switch_project(
+    project_router: ProjectRouter,
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    """Handle switch_project tool call."""
+    name_or_id = arguments.get("name_or_id", "")
+    
+    if not name_or_id:
+        return [TextContent(type="text", text="Please provide a project name or ID.")]
+    
+    loop = asyncio.get_event_loop()
+    
+    try:
+        # Try as UUID first
+        try:
+            project_id = UUID(name_or_id)
+            await loop.run_in_executor(
+                None,
+                lambda: project_router.switch_project(project_id),
+            )
+            project = await loop.run_in_executor(
+                None,
+                lambda: project_router.get_project(project_id),
+            )
+        except ValueError:
+            # Try as name
+            await loop.run_in_executor(
+                None,
+                lambda: project_router.switch_project_by_name(name_or_id),
+            )
+            project = await loop.run_in_executor(
+                None,
+                lambda: project_router.get_project_by_name(name_or_id),
+            )
+        
+        return [TextContent(
+            type="text",
+            text=f"Switched to project '{project.name}'.\n"
+                 f"All memory operations will now use this project.\n"
+                 f"Note: Restart the MCP server to use the new project's memory index.",
+        )]
+        
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+async def _handle_project_status(
+    project_router: ProjectRouter,
+    config: Config,
+) -> list[TextContent]:
+    """Handle project_status tool call."""
+    loop = asyncio.get_event_loop()
+    
+    status = await loop.run_in_executor(None, project_router.get_project_status)
+    
+    if not status.get("active"):
+        return [TextContent(type="text", text=status.get("message", "No active project"))]
+    
+    lines = [
+        f"Active Project: {status['project_name']}",
+        f"ID: {status['project_id'][:8]}...",
+        f"Path: {status['root_path']}",
+        f"Created: {status['created_at'][:10]}",
+        "",
+        f"Memories: {status['memory_count']} confirmed",
+    ]
+    
+    if status['pending_count'] > 0:
+        lines.append(f"Pending: {status['pending_count']}")
+    
+    lines.extend([
+        "",
+        f"Embedding: {config.embedding_provider.value}",
+    ])
+    
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def run_mcp_server(config: Config, project_id: UUID) -> None:

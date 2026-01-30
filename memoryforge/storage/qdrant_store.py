@@ -27,7 +27,8 @@ class QdrantStore:
     def __init__(
         self,
         storage_path: Path,
-        collection_name: str = "memories",
+        project_id: Optional[UUID] = None,
+        collection_name: Optional[str] = None,
         embedding_dimension: int = DEFAULT_EMBEDDING_DIMENSION,
     ):
         """
@@ -35,12 +36,23 @@ class QdrantStore:
         
         Args:
             storage_path: Path to store Qdrant data
-            collection_name: Name of the collection
+            project_id: Project ID for scoped collection (v2). If provided,
+                        collection name will be 'memories_{project_id[:8]}'
+            collection_name: Override collection name (for backward compatibility)
             embedding_dimension: Dimension of embeddings (384 for local, 1536 for OpenAI)
         """
         self.storage_path = storage_path
-        self.collection_name = collection_name
         self.embedding_dimension = embedding_dimension
+        self.project_id = project_id
+        
+        # v2: Per-project collection naming
+        if collection_name:
+            self.collection_name = collection_name
+        elif project_id:
+            # Use first 8 chars of project ID for shorter, readable names
+            self.collection_name = f"memories_{str(project_id)[:8]}"
+        else:
+            self.collection_name = "memories"
         
         # Initialize embedded Qdrant client
         self.storage_path.mkdir(parents=True, exist_ok=True)

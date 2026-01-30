@@ -54,6 +54,20 @@ class Config(BaseSettings):
     mcp_host: str = Field(default="localhost")
     mcp_port: int = Field(default=3000)
     
+    # v2: Multi-project (active project stored here, NOT in DB)
+    active_project_id: Optional[str] = None
+    
+    # v2: Git integration
+    enable_git_integration: bool = False
+    
+    # v2: Consolidation settings
+    consolidation_threshold: float = Field(default=0.90, ge=0.7, le=0.99)
+    
+    # v2.1: Sync settings
+    sync_key: Optional[str] = None
+    sync_path: Optional[Path] = None
+    sync_backend: str = "local"
+    
     class Config:
         env_prefix = "MEMORYFORGE_"
         env_file = ".env"
@@ -90,6 +104,14 @@ class Config(BaseSettings):
             "min_score": self.min_score,
             "mcp_host": self.mcp_host,
             "mcp_port": self.mcp_port,
+            # v2 fields
+            "active_project_id": self.active_project_id,
+            "enable_git_integration": self.enable_git_integration,
+            "consolidation_threshold": self.consolidation_threshold,
+            # v2.1 fields
+            "sync_key": self.sync_key,
+            "sync_path": str(self.sync_path) if self.sync_path else None,
+            "sync_backend": self.sync_backend,
         }
         
         with open(config_path, "w") as f:

@@ -35,6 +35,27 @@ MemoryForge provides persistent, semantic memory for AI pair programmers. Store 
 
 ## Installation
 
+> [!NOTE]
+> **PyPI Release Coming Soon!** A stable version will be available on PyPI shortly.
+> For now, install directly from GitHub.
+
+### Install from GitHub
+
+```bash
+# Standard installation
+pip install git+https://github.com/agusain2001/memoryforge.git
+
+# With all extras (local embeddings, OpenAI, sync)
+pip install "memoryforge[all] @ git+https://github.com/agusain2001/memoryforge.git"
+
+# With specific extras
+pip install "memoryforge[local] @ git+https://github.com/agusain2001/memoryforge.git"   # Local embeddings
+pip install "memoryforge[openai] @ git+https://github.com/agusain2001/memoryforge.git"  # OpenAI embeddings
+pip install "memoryforge[sync] @ git+https://github.com/agusain2001/memoryforge.git"    # Team sync
+```
+
+### Install from PyPI (Coming Soon)
+
 ```bash
 # Basic installation
 pip install memoryforge

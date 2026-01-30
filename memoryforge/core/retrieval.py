@@ -10,7 +10,7 @@ Handles semantic search and retrieval with:
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from memoryforge.models import Memory, MemoryType, SearchResult
@@ -54,6 +54,7 @@ class RetrievalEngine:
         memory_type: Optional[MemoryType] = None,
         limit: Optional[int] = None,
         min_score: Optional[float] = None,
+        exclude_stale: bool = False,
     ) -> list[SearchResult]:
         """
         Search for relevant memories using semantic similarity.
@@ -97,8 +98,10 @@ class RetrievalEngine:
             results = []
             for vr in vector_results:
                 memory = self.db.get_memory(UUID(vr["memory_id"]))
-                # v2: Skip archived memories
+                # v2: Skip archived memories and optionally stale memories
                 if memory and memory.confirmed and not memory.is_archived:
+                    if exclude_stale and memory.is_stale:
+                        continue
                     results.append({
                         "memory": memory,
                         "score": vr["score"],
@@ -140,7 +143,7 @@ class RetrievalEngine:
             # Fallback to keyword search in SQLite
             return self._fallback_keyword_search(query, memory_type, limit)
 
-    def get_timeline(self, limit: int = 20) -> List[Memory]:
+    def get_timeline(self, limit: int = 20) -> list[Memory]:
         """
         Get memories in chronological order (most recent first).
         

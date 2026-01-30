@@ -1401,5 +1401,101 @@ def sync_pull(ctx: click.Context) -> None:
         console.print(f"[red]Sync failed: {e}[/red]")
 
 
+@sync.command("status")
+@click.pass_context
+def sync_status(ctx: click.Context) -> None:
+    """Show sync configuration and status."""
+    config: Config = ctx.obj["config"]
+    
+    if not config.sync_path or not config.sync_key:
+        console.print("[yellow]Sync not initialized.[/yellow]")
+        console.print("Run: [cyan]memoryforge sync init --path <sync-dir>[/cyan]")
+        return
+    
+    console.print(Panel.fit(
+        f"[bold]Backend:[/bold] {config.sync_backend or 'local'}\n"
+        f"[bold]Path:[/bold] {config.sync_path}\n"
+        f"[bold]Key:[/bold] {'*' * 8}...{config.sync_key[-8:] if len(config.sync_key) > 8 else '****'}",
+        title="Sync Configuration",
+        border_style="blue",
+    ))
+    
+    # Check if sync path exists and has files
+    if config.sync_path.exists():
+        sync_files = list(config.sync_path.glob("*.json"))
+        console.print(f"\n[bold]Remote memories:[/bold] {len(sync_files)} files")
+    else:
+        console.print("\n[yellow]Sync directory does not exist yet.[/yellow]")
+
+
+# ============================================================================
+# Reindex Command
+# ============================================================================
+
+@main.command("reindex")
+@click.option("--force", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def reindex(ctx: click.Context, force: bool) -> None:
+    """Rebuild vector index from SQLite data.
+    
+    Use this after changing embedding provider or if Qdrant gets corrupted.
+    """
+    config: Config = ctx.obj["config"]
+    db, qdrant, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.embedding_factory import create_embedding_service
+    
+    # Count memories to reindex
+    memory_count = db.get_memory_count(project_id, confirmed_only=True)
+    
+    if memory_count == 0:
+        console.print("[dim]No confirmed memories to reindex.[/dim]")
+        return
+    
+    console.print(f"This will re-embed {memory_count} memories.")
+    console.print(f"Embedding provider: {config.embedding_provider.value}")
+    
+    if not force and not Confirm.ask("Proceed with reindex?"):
+        return
+    
+    embedding_service = create_embedding_service(config)
+    
+    # Get all confirmed memories
+    memories = db.list_memories(project_id, confirmed_only=True, limit=10000)
+    
+    success_count = 0
+    error_count = 0
+    
+    with console.status("[bold green]Reindexing memories...") as status:
+        for i, memory in enumerate(memories):
+            try:
+                # Generate new embedding
+                embedding = embedding_service.generate(memory.content)
+                
+                # Upsert to Qdrant
+                vector_id = qdrant.upsert(
+                    memory_id=str(memory.id),
+                    embedding=embedding,
+                    metadata={
+                        "type": memory.type.value,
+                        "project_id": str(project_id),
+                    }
+                )
+                
+                # Update embedding reference
+                db.save_embedding_reference(memory.id, vector_id)
+                
+                success_count += 1
+                status.update(f"[bold green]Reindexing memories... {i+1}/{len(memories)}")
+                
+            except Exception as e:
+                error_count += 1
+                logger.warning(f"Failed to reindex memory {memory.id}: {e}")
+    
+    console.print(f"\n[green]✓ Reindexed {success_count} memories[/green]")
+    if error_count > 0:
+        console.print(f"[yellow]⚠ {error_count} memories failed[/yellow]")
+
+
 if __name__ == "__main__":
     main()

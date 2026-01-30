@@ -52,6 +52,7 @@ class ProjectRouter:
             ValueError: If project with same name exists
         """
         # Check for existing project with same name
+        name = name.strip()  # Normalize name
         existing = self.db.get_project_by_name(name)
         if existing:
             raise ValueError(f"Project '{name}' already exists")
@@ -286,3 +287,30 @@ class ProjectRouter:
         raise RuntimeError(
             "No projects found. Run 'memoryforge init' to create a project."
         )
+    
+    def detect_project_from_path(self, path: Path) -> Optional[Project]:
+        """
+        Detect which project a file path belongs to.
+        
+        Checks if the given path is within any project's root directory.
+        
+        Args:
+            path: Path to check (can be file or directory)
+            
+        Returns:
+            The matching Project, or None if no project matches
+        """
+        path = path.resolve()
+        projects = self.list_projects()
+        
+        for project in projects:
+            try:
+                project_root = Path(project.root_path).resolve()
+                # Check if path is within project root
+                if path == project_root or project_root in path.parents:
+                    return project
+            except (OSError, ValueError):
+                # Invalid path in project, skip
+                continue
+        
+        return None

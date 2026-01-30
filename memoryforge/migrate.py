@@ -8,13 +8,17 @@ Migrations handled:
 - Adding v2 columns (is_stale, last_accessed, etc.)
 - Creating new tables (schema_version, memory_versions, memory_links)
 - Initializing schema version if missing
+
+v2.1: Added migration verification and backup retention management.
 """
 
+import glob
 import logging
 import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 from memoryforge.config import Config
 from memoryforge.storage.sqlite_db import SQLiteDatabase
@@ -27,6 +31,11 @@ class MigrationError(Exception):
     pass
 
 
+class MigrationVerificationError(MigrationError):
+    """Raised when migration verification fails."""
+    pass
+
+
 class Migrator:
     """
     Handles database migrations safely.
@@ -35,7 +44,10 @@ class Migrator:
     1. Always backup first
     2. Use transactions
     3. Verify success or rollback
+    4. Clean up old backups
     """
+    
+    MAX_BACKUPS = 5  # Keep only the last 5 backups
     
     def __init__(self, config: Config):
         """Initialize migrator."""
@@ -78,51 +90,236 @@ class Migrator:
         except Exception as e:
             raise MigrationError(f"Failed to restore backup: {e}")
     
-    def run_migration(self) -> bool:
+    def list_backups(self) -> List[Path]:
         """
-        Run migration from v1 to v2.
+        List all backup files, sorted by modification time (newest first).
         
         Returns:
-            True if migration successful (or already done)
+            List of backup file paths
         """
+        pattern = str(self.db_path.parent / "memoryforge_*_backup_*.sqlite")
+        backups = [Path(p) for p in glob.glob(pattern)]
+        backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return backups
+    
+    def cleanup_old_backups(self, keep_count: Optional[int] = None) -> int:
+        """
+        Remove old backup files, keeping only the most recent ones.
+        
+        Args:
+            keep_count: Number of backups to keep (default: MAX_BACKUPS)
+            
+        Returns:
+            Number of backups deleted
+        """
+        keep_count = keep_count or self.MAX_BACKUPS
+        backups = self.list_backups()
+        
+        if len(backups) <= keep_count:
+            return 0
+        
+        to_delete = backups[keep_count:]
+        deleted = 0
+        
+        for backup in to_delete:
+            try:
+                backup.unlink()
+                logger.info(f"Deleted old backup: {backup}")
+                deleted += 1
+            except Exception as e:
+                logger.warning(f"Failed to delete backup {backup}: {e}")
+        
+        return deleted
+    
+    def run_migration(self, verify: bool = True, target_version: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+        """
+        Run migration to target version (multi-version support).
+        
+        Supports incremental migrations: v1 → v2 → v3 → ...
+        
+        Args:
+            verify: If True, verify migration success
+            target_version: Target schema version (default: latest)
+        
+        Returns:
+            Tuple of (success, error_message)
+        """
+        LATEST_VERSION = 3  # Current latest schema version
+        target = target_version or LATEST_VERSION
+        
         if not self.db_path.exists():
-            self._init_new_db()
-            return True
+            self._init_new_db(target)
+            return True, None
         
         # 1. Check current version
         current_version = self._get_schema_version()
-        if current_version >= 2:
-            logger.info("Database is already at v2 or higher")
-            return True
         
-        logger.info(f"Migrating database from v{current_version} to v2...")
+        if current_version >= target:
+            logger.info(f"Database is already at v{current_version} (target: v{target})")
+            return True, None
         
-        # 2. Backup
+        logger.info(f"Migrating database from v{current_version} to v{target}...")
+        
+        # 2. Get pre-migration counts for verification
+        pre_counts = self._get_table_counts() if verify else {}
+        
+        # 3. Backup
         backup_path = self.backup_database()
         
-        # 3. Migrate
+        # 4. Run incremental migrations
         try:
-            self._perform_migration()
-            logger.info("Migration to v2 successful")
-            return True
+            for from_version in range(current_version, target):
+                to_version = from_version + 1
+                logger.info(f"  Running migration v{from_version} → v{to_version}...")
+                self._perform_migration_step(from_version, to_version)
+            
+            # 5. Verify migration
+            if verify:
+                self._verify_migration(pre_counts)
+            
+            # 6. Cleanup old backups
+            deleted = self.cleanup_old_backups()
+            if deleted:
+                logger.info(f"Cleaned up {deleted} old backup(s)")
+            
+            logger.info(f"Migration to v{target} successful")
+            return True, None
+            
+        except MigrationVerificationError as e:
+            logger.error(f"Migration verification failed: {e}")
+            logger.info("Restoring backup...")
+            self.restore_backup(backup_path)
+            return False, str(e)
         except Exception as e:
             logger.error(f"Migration failed: {e}")
             logger.info("Restoring backup...")
             self.restore_backup(backup_path)
-            return False
+            return False, str(e)
     
-    def _init_new_db(self) -> None:
-        """Initialize a new database (implicitly v2 via SQLiteDatabase class)."""
-        logger.info("Initializing new database (v2)")
-        db = SQLiteDatabase(self.db_path)
-        # SQLiteDatabase init already creates full v2 schema
-        # We just need to verify schema_version is set
+    def _perform_migration_step(self, from_version: int, to_version: int) -> None:
+        """Perform a single migration step."""
+        migration_method = getattr(self, f"_migrate_v{from_version}_to_v{to_version}", None)
+        
+        if migration_method is None:
+            # Fallback to legacy method for v1→v2
+            if from_version == 1 and to_version == 2:
+                self._perform_migration()
+            else:
+                raise MigrationError(f"No migration path from v{from_version} to v{to_version}")
+        else:
+            migration_method()
+    
+    def _migrate_v2_to_v3(self) -> None:
+        """
+        Migrate from v2 to v3.
+        
+        v3 additions:
+        - sync_history table for tracking sync operations
+        - memory_tags table for performance
+        - Performance indexes
+        """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            
+            # Create sync history table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sync_history (
+                    id TEXT PRIMARY KEY,
+                    operation TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    memories_affected INTEGER,
+                    conflicts INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'success'
+                )
+            """)
+            
+            # Create memory tags for faster filtering
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS memory_tags (
+                    id TEXT PRIMARY KEY,
+                    memory_id TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Add v3 indexes
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_tags_memory ON memory_tags(memory_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_history_timestamp ON sync_history(timestamp)")
+            
+            # Update schema version
             cursor.execute(
-                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (2, ?)",
+                "INSERT INTO schema_version (version, applied_at) VALUES (3, ?)",
                 (datetime.utcnow().isoformat(),)
             )
+            
+            conn.commit()
+    
+    def _get_table_counts(self) -> dict:
+        """Get row counts for all tables."""
+        counts = {}
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get all table names
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+                tables = [row[0] for row in cursor.fetchall()]
+                
+                for table in tables:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    counts[table] = cursor.fetchone()[0]
+        except Exception as e:
+            logger.warning(f"Could not get table counts: {e}")
+        
+        return counts
+    
+    def _verify_migration(self, pre_counts: dict) -> None:
+        """
+        Verify migration preserved all data.
+        
+        Args:
+            pre_counts: Pre-migration table counts
+            
+        Raises:
+            MigrationVerificationError: If verification fails
+        """
+        post_counts = self._get_table_counts()
+        
+        # Key tables that must preserve data
+        critical_tables = ["memories", "projects"]
+        
+        for table in critical_tables:
+            pre = pre_counts.get(table, 0)
+            post = post_counts.get(table, 0)
+            
+            if post < pre:
+                raise MigrationVerificationError(
+                    f"Data loss detected in '{table}': had {pre} rows, now have {post}"
+                )
+        
+        logger.info(f"Migration verified: {post_counts}")
+    
+    def _init_new_db(self, target_version: int = 2) -> None:
+        """Initialize a new database at target version."""
+        logger.info(f"Initializing new database (v{target_version})")
+        db = SQLiteDatabase(self.db_path)
+        # SQLiteDatabase init already creates full v2 schema
+        # Run any additional migrations if target > 2
+        if target_version >= 2:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (2, ?)",
+                    (datetime.utcnow().isoformat(),)
+                )
+        
+        if target_version >= 3:
+            self._migrate_v2_to_v3()
     
     def _get_schema_version(self) -> int:
         """Get current schema version."""
@@ -211,3 +408,37 @@ class Migrator:
             )
             
             conn.commit()
+    
+    def get_rollback_warning(self) -> Optional[str]:
+        """
+        Get warning about potential data loss from rollback.
+        
+        Returns:
+            Warning message if there's risk, None otherwise
+        """
+        backups = self.list_backups()
+        if not backups:
+            return None
+        
+        latest_backup = backups[0]
+        backup_time = datetime.fromtimestamp(latest_backup.stat().st_mtime)
+        
+        # Count memories created after backup
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT COUNT(*) FROM memories WHERE created_at > ?",
+                    (backup_time.isoformat(),)
+                )
+                new_memories = cursor.fetchone()[0]
+                
+                if new_memories > 0:
+                    return (
+                        f"WARNING: Rolling back will delete {new_memories} memories "
+                        f"created after {backup_time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+        except Exception:
+            pass
+        
+        return None

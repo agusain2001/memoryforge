@@ -112,7 +112,7 @@ class MemoryConsolidator:
             List of (memory1, memory2, similarity_score) tuples
         """
         # Get all confirmed, non-archived memories
-        memories = self.db.get_memories(
+        memories = self.db.list_memories(
             project_id=self.project_id,
             confirmed_only=True,
             include_archived=False,
@@ -128,7 +128,7 @@ class MemoryConsolidator:
         for i, memory in enumerate(memories):
             # Get embedding for this memory
             try:
-                embedding = self.embedding_service.embed(memory.content)
+                embedding = self.embedding_service.generate(memory.content)
             except Exception as e:
                 logger.warning(f"Failed to embed memory {memory.id}: {e}")
                 continue
@@ -302,7 +302,7 @@ class MemoryConsolidator:
             content=merged_content,
             type=memory_type,
             source=MemorySource.MANUAL,  # Consolidation is manual action
-            is_confirmed=True,  # Consolidations are auto-confirmed
+            confirmed=True,  # Consolidations are auto-confirmed
             created_at=datetime.utcnow(),
         )
         
@@ -310,7 +310,7 @@ class MemoryConsolidator:
         
         # Get embedding and index in Qdrant
         try:
-            embedding = self.embedding_service.embed(merged_content)
+            embedding = self.embedding_service.generate(merged_content)
             self.qdrant.upsert(new_memory.id, embedding)
         except Exception as e:
             logger.warning(f"Failed to index consolidated memory: {e}")
@@ -365,9 +365,8 @@ class MemoryConsolidator:
         if not consolidated:
             raise ValueError(f"Memory not found: {consolidated_memory_id}")
         
-        # Find archived memories that point to this one
-        archived = self.db.get_archived_memories(self.project_id)
-        sources = [m for m in archived if m.consolidated_into == consolidated_memory_id]
+        # Find archived memories that were consolidated into this one
+        sources = self.db.get_archived_memories(consolidated_memory_id)
         
         if not sources:
             raise ValueError(
@@ -381,7 +380,7 @@ class MemoryConsolidator:
             
             # Re-index in Qdrant
             try:
-                embedding = self.embedding_service.embed(memory.content)
+                embedding = self.embedding_service.generate(memory.content)
                 self.qdrant.upsert(memory.id, embedding)
             except Exception as e:
                 logger.warning(f"Failed to re-index restored memory: {e}")
@@ -472,7 +471,7 @@ class MemoryConsolidator:
         cutoff = datetime.utcnow() - timedelta(days=days_unused)
         
         # Get all confirmed memories
-        memories = self.db.get_memories(
+        memories = self.db.list_memories(
             project_id=self.project_id,
             confirmed_only=True,
             include_archived=False,
@@ -497,14 +496,14 @@ class MemoryConsolidator:
         Returns:
             Dict with consolidation statistics
         """
-        memories = self.db.get_memories(
+        memories = self.db.list_memories(
             project_id=self.project_id,
             confirmed_only=True,
             include_archived=False,
             limit=1000,
         )
         
-        archived = self.db.get_archived_memories(self.project_id)
+        archived = self.db.get_all_archived_memories(self.project_id)
         stale = self.db.get_stale_memories(self.project_id)
         
         # Count similar pairs
@@ -517,3 +516,99 @@ class MemoryConsolidator:
             "similar_pairs": len(pairs),
             "threshold": self.threshold,
         }
+    
+    def suggest_stale_for_consolidation(
+        self,
+        days_unused: int = 30,
+        min_similarity: float = 0.85,
+    ) -> List[ConsolidationSuggestion]:
+        """
+        Find stale/unused memories that could be consolidated or archived.
+        
+        Integrates staleness tracking with consolidation suggestions by:
+        1. Finding memories not accessed in `days_unused` days
+        2. Checking if similar active memories exist
+        3. Suggesting consolidation if similar, archival if unique
+        
+        Args:
+            days_unused: Days since last access to consider stale
+            min_similarity: Minimum similarity for consolidation suggestion
+            
+        Returns:
+            List of ConsolidationSuggestion with stale memories
+        """
+        unused = self.find_unused_memories(days_unused)
+        suggestions = []
+        
+        for memory in unused:
+            # Find similar active memories
+            try:
+                embedding = self.embedding_service.generate(memory.content)
+            except Exception as e:
+                logger.warning(f"Failed to embed memory {memory.id}: {e}")
+                continue
+            
+            results = self.qdrant.search(
+                embedding,
+                limit=5,
+                min_score=min_similarity,
+            )
+            
+            # Filter out self and archived
+            similar_active = []
+            for result in results:
+                if result.id == memory.id:
+                    continue
+                other = self.db.get_memory(result.id)
+                if other and not other.is_archived and not other.is_stale:
+                    similar_active.append((other, result.score))
+            
+            if similar_active:
+                # Suggest merging stale memory into active one
+                best_match, score = similar_active[0]
+                suggestions.append(ConsolidationSuggestion(
+                    source_memories=[memory, best_match],
+                    similarity_score=score,
+                    suggested_content=f"[Consolidated from stale: {memory.id}]\n{best_match.content}\n\nAdditional context: {memory.content}",
+                    memory_type=best_match.type,
+                ))
+            else:
+                # Mark as stale if no similar active memories
+                if not memory.is_stale:
+                    self.mark_stale(
+                        memory.id,
+                        f"Not accessed in {days_unused} days and no similar active memories"
+                    )
+        
+        return suggestions
+    
+    def auto_archive_stale(
+        self,
+        days_stale: int = 90,
+        dry_run: bool = True,
+    ) -> List[Memory]:
+        """
+        Auto-archive memories that have been stale for a long time.
+        
+        Args:
+            days_stale: Days since marked stale to auto-archive
+            dry_run: If True, only return candidates without archiving
+            
+        Returns:
+            List of archived (or to-be-archived) memories
+        """
+        from datetime import timedelta
+        
+        cutoff = datetime.utcnow() - timedelta(days=days_stale)
+        stale = self.db.get_stale_memories(self.project_id)
+        
+        # Filter to memories stale for long enough
+        # Note: We'd need a stale_since field for proper implementation
+        candidates = [m for m in stale if m.last_accessed and m.last_accessed < cutoff]
+        
+        if not dry_run:
+            for memory in candidates:
+                self.archive_memory(memory.id)
+        
+        return candidates
+

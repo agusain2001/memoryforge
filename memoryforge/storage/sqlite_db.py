@@ -233,8 +233,9 @@ class SQLiteDatabase:
             cursor.execute(
                 """
                 INSERT INTO memories 
-                (id, project_id, content, type, source, created_at, updated_at, confirmed, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, project_id, content, type, source, created_at, updated_at, confirmed, metadata,
+                 is_stale, stale_reason, last_accessed, is_archived, consolidated_into)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(memory.id),
@@ -246,9 +247,18 @@ class SQLiteDatabase:
                     memory.updated_at.isoformat() if memory.updated_at else None,
                     1 if memory.confirmed else 0,
                     str(memory.metadata),
+                    1 if memory.is_stale else 0,
+                    memory.stale_reason,
+                    memory.last_accessed.isoformat() if memory.last_accessed else None,
+                    1 if memory.is_archived else 0,
+                    str(memory.consolidated_into) if memory.consolidated_into else None,
                 ),
             )
         return memory
+    
+    def save_memory(self, memory: Memory) -> Memory:
+        """Save a memory (alias for create_memory, used by sync)."""
+        return self.create_memory(memory)
     
     def get_memory(self, memory_id: UUID) -> Optional[Memory]:
         """Get a memory by ID."""
@@ -728,6 +738,21 @@ class SQLiteDatabase:
                 ORDER BY created_at DESC
                 """,
                 (str(consolidated_into),),
+            )
+            rows = cursor.fetchall()
+            return [self._row_to_memory(row) for row in rows]
+    
+    def get_all_archived_memories(self, project_id: UUID) -> list[Memory]:
+        """Get all archived memories for a project."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM memories 
+                WHERE project_id = ? AND is_archived = 1
+                ORDER BY created_at DESC
+                """,
+                (str(project_id),),
             )
             rows = cursor.fetchall()
             return [self._row_to_memory(row) for row in rows]

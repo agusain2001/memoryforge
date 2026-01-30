@@ -517,8 +517,9 @@ async def _handle_switch_project(
         return [TextContent(
             type="text",
             text=f"Switched to project '{project.name}'.\n"
-                 f"All memory operations will now use this project.\n"
-                 f"Note: Restart the MCP server to use the new project's memory index.",
+                 f"Active project ID: {project.id}\n"
+                 f"Configuration updated. This session continues using the previous project.\n"
+                 f"New sessions (including CLI commands) will use the new project.",
         )]
         
     except ValueError as e:

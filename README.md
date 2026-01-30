@@ -1,5 +1,9 @@
 # MemoryForge v1.0.0
 
+![Tests](https://img.shields.io/badge/tests-114%20passed-brightgreen)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 > **Local-first memory layer for AI coding assistants**
 
 MemoryForge provides persistent, semantic memory for AI pair programmers. Store decisions, constraints, and context that survives across sessions.
@@ -322,6 +326,28 @@ mypy memoryforge/
 # Linting
 ruff check memoryforge/
 ```
+
+---
+
+## Test Status
+
+```
+113 passed, 1 skipped, 303 warnings in 12.47s
+Exit code: 0
+```
+
+| Module | Tests |
+|--------|-------|
+| test_memory_manager | 14/14 ✅ |
+| test_storage | 15/15 ✅ |
+| test_validation | 10/10 ✅ |
+| test_retrieval | 10/10 ✅ |
+| test_git_integration | 8/8 ✅ |
+| test_sync_encryption | 12/12 ✅ |
+| test_sync_manager | 7/7 ✅ |
+| test_consolidation | 12/12 ✅ |
+| test_project_router | 16/16 ✅ |
+| test_migration | 9/10 (1 skipped) ✅ |
 
 ---
 

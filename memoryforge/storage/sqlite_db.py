@@ -12,10 +12,13 @@ from pathlib import Path
 from typing import Generator, Optional
 from uuid import UUID
 
-from memoryforge.models import Memory, MemoryType, MemorySource, Project, MemoryVersion, MemoryLink, LinkType
+from memoryforge.models import (
+    Memory, MemoryType, MemorySource, Project, MemoryVersion, MemoryLink, LinkType,
+    MemoryRelation, RelationType, ConflictLog, ConflictResolution  # v3
+)
 
 # Current schema version
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class SQLiteDatabase:
@@ -146,6 +149,53 @@ class SQLiteDatabase:
             
             # Add v2 columns to memories table if not exist
             self._add_v2_columns(conn)
+            
+            # ========== v3 Schema Additions ==========
+            
+            # Memory relations (Graph Memory - memory-to-memory links)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS memory_relations (
+                    id TEXT PRIMARY KEY,
+                    source_memory_id TEXT NOT NULL,
+                    target_memory_id TEXT NOT NULL,
+                    relation_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT,
+                    FOREIGN KEY (source_memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+                    FOREIGN KEY (target_memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Conflict log (Team Sync conflicts)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS conflict_log (
+                    id TEXT PRIMARY KEY,
+                    memory_id TEXT NOT NULL,
+                    local_content TEXT,
+                    remote_content TEXT,
+                    resolution TEXT NOT NULL,
+                    resolved_at TEXT NOT NULL,
+                    resolved_by TEXT,
+                    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # v3 indexes
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_memory_relations_source 
+                ON memory_relations(source_memory_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_memory_relations_target 
+                ON memory_relations(target_memory_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conflict_log_memory 
+                ON conflict_log(memory_id)
+            """)
+            
+            # Add v3 columns to memories table if not exist
+            self._add_v3_columns(conn)
     
     # ========== Project Operations ==========
     
@@ -234,8 +284,8 @@ class SQLiteDatabase:
                 """
                 INSERT INTO memories 
                 (id, project_id, content, type, source, created_at, updated_at, confirmed, metadata,
-                 is_stale, stale_reason, last_accessed, is_archived, consolidated_into)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 is_stale, stale_reason, last_accessed, is_archived, consolidated_into, confidence_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(memory.id),
@@ -252,6 +302,7 @@ class SQLiteDatabase:
                     memory.last_accessed.isoformat() if memory.last_accessed else None,
                     1 if memory.is_archived else 0,
                     str(memory.consolidated_into) if memory.consolidated_into else None,
+                    memory.confidence_score,
                 ),
             )
         return memory
@@ -277,7 +328,7 @@ class SQLiteDatabase:
     
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
         """Convert a database row to a Memory object."""
-        # Get row keys for safe access to v2 columns
+        # Get row keys for safe access to v2/v3 columns
         row_keys = row.keys()
         
         return Memory(
@@ -296,6 +347,8 @@ class SQLiteDatabase:
             last_accessed=datetime.fromisoformat(row["last_accessed"]) if "last_accessed" in row_keys and row["last_accessed"] else None,
             is_archived=bool(row["is_archived"]) if "is_archived" in row_keys and row["is_archived"] else False,
             consolidated_into=UUID(row["consolidated_into"]) if "consolidated_into" in row_keys and row["consolidated_into"] else None,
+            # v3 fields
+            confidence_score=float(row["confidence_score"]) if "confidence_score" in row_keys and row["confidence_score"] is not None else 1.0,
         )
     
     def list_memories(
@@ -781,3 +834,242 @@ class SQLiteDatabase:
                 """,
                 (version, datetime.utcnow().isoformat(), description),
             )
+    
+    # ========== v3 Operations ==========
+    
+    def _add_v3_columns(self, conn: sqlite3.Connection) -> None:
+        """Add v3 columns to memories table if they don't exist."""
+        cursor = conn.cursor()
+        
+        # Get existing columns
+        cursor.execute("PRAGMA table_info(memories)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        # v3 columns to add
+        v3_columns = [
+            ("confidence_score", "REAL DEFAULT 1.0"),
+        ]
+        
+        for col_name, col_type in v3_columns:
+            if col_name not in existing_columns:
+                cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_type}")
+    
+    # ========== Memory Relation Operations (Graph Memory) ==========
+    
+    def create_memory_relation(
+        self,
+        source_memory_id: UUID,
+        target_memory_id: UUID,
+        relation_type: RelationType,
+        created_by: Optional[str] = None,
+    ) -> MemoryRelation:
+        """Create a relation between two memories."""
+        from uuid import uuid4
+        
+        relation = MemoryRelation(
+            id=uuid4(),
+            source_memory_id=source_memory_id,
+            target_memory_id=target_memory_id,
+            relation_type=relation_type,
+            created_by=created_by,
+        )
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO memory_relations (id, source_memory_id, target_memory_id, relation_type, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(relation.id),
+                    str(relation.source_memory_id),
+                    str(relation.target_memory_id),
+                    relation.relation_type.value,
+                    relation.created_at.isoformat(),
+                    relation.created_by,
+                ),
+            )
+        return relation
+    
+    def get_memory_relations(self, memory_id: UUID, direction: str = "both") -> list[MemoryRelation]:
+        """Get all relations for a memory.
+        
+        Args:
+            memory_id: The memory ID to query
+            direction: 'outgoing' (source), 'incoming' (target), or 'both'
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            if direction == "outgoing":
+                cursor.execute(
+                    "SELECT * FROM memory_relations WHERE source_memory_id = ?",
+                    (str(memory_id),),
+                )
+            elif direction == "incoming":
+                cursor.execute(
+                    "SELECT * FROM memory_relations WHERE target_memory_id = ?",
+                    (str(memory_id),),
+                )
+            else:  # both
+                cursor.execute(
+                    """
+                    SELECT * FROM memory_relations 
+                    WHERE source_memory_id = ? OR target_memory_id = ?
+                    """,
+                    (str(memory_id), str(memory_id)),
+                )
+            
+            rows = cursor.fetchall()
+            return [
+                MemoryRelation(
+                    id=UUID(row["id"]),
+                    source_memory_id=UUID(row["source_memory_id"]),
+                    target_memory_id=UUID(row["target_memory_id"]),
+                    relation_type=RelationType(row["relation_type"]),
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    created_by=row["created_by"],
+                )
+                for row in rows
+            ]
+    
+    def delete_memory_relation(self, relation_id: UUID) -> bool:
+        """Delete a memory relation."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM memory_relations WHERE id = ?",
+                (str(relation_id),),
+            )
+            return cursor.rowcount > 0
+    
+    def get_causality_chain(self, memory_id: UUID, max_depth: int = 10) -> list[Memory]:
+        """Get the causality chain for a memory (memories it was caused by)."""
+        chain = []
+        visited = set()
+        current_id = memory_id
+        
+        for _ in range(max_depth):
+            if current_id in visited:
+                break
+            visited.add(current_id)
+            
+            relations = self.get_memory_relations(current_id, direction="outgoing")
+            caused_by = [r for r in relations if r.relation_type == RelationType.CAUSED_BY]
+            
+            if not caused_by:
+                break
+            
+            # Follow the first CAUSED_BY relation
+            parent_id = caused_by[0].target_memory_id
+            parent_memory = self.get_memory(parent_id)
+            if parent_memory:
+                chain.append(parent_memory)
+                current_id = parent_id
+            else:
+                break
+        
+        return chain
+    
+    # ========== Conflict Log Operations ==========
+    
+    def log_conflict(
+        self,
+        memory_id: UUID,
+        local_content: Optional[str],
+        remote_content: Optional[str],
+        resolution: ConflictResolution,
+        resolved_by: Optional[str] = None,
+    ) -> ConflictLog:
+        """Log a sync conflict and its resolution."""
+        from uuid import uuid4
+        
+        conflict = ConflictLog(
+            id=uuid4(),
+            memory_id=memory_id,
+            local_content=local_content,
+            remote_content=remote_content,
+            resolution=resolution,
+            resolved_by=resolved_by,
+        )
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO conflict_log (id, memory_id, local_content, remote_content, resolution, resolved_at, resolved_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(conflict.id),
+                    str(conflict.memory_id),
+                    conflict.local_content,
+                    conflict.remote_content,
+                    conflict.resolution.value,
+                    conflict.resolved_at.isoformat(),
+                    conflict.resolved_by,
+                ),
+            )
+        return conflict
+    
+    def get_conflict_history(self, memory_id: Optional[UUID] = None) -> list[ConflictLog]:
+        """Get conflict history, optionally filtered by memory."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            if memory_id:
+                cursor.execute(
+                    "SELECT * FROM conflict_log WHERE memory_id = ? ORDER BY resolved_at DESC",
+                    (str(memory_id),),
+                )
+            else:
+                cursor.execute("SELECT * FROM conflict_log ORDER BY resolved_at DESC")
+            
+            rows = cursor.fetchall()
+            return [
+                ConflictLog(
+                    id=UUID(row["id"]),
+                    memory_id=UUID(row["memory_id"]),
+                    local_content=row["local_content"],
+                    remote_content=row["remote_content"],
+                    resolution=ConflictResolution(row["resolution"]),
+                    resolved_at=datetime.fromisoformat(row["resolved_at"]),
+                    resolved_by=row["resolved_by"],
+                )
+                for row in rows
+            ]
+    
+    # ========== Confidence Score Operations ==========
+    
+    def update_confidence_score(self, memory_id: UUID, score: float) -> bool:
+        """Update the confidence score for a memory."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE memories 
+                SET confidence_score = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (score, datetime.utcnow().isoformat(), str(memory_id)),
+            )
+            return cursor.rowcount > 0
+    
+    def get_low_confidence_memories(
+        self, project_id: UUID, threshold: float = 0.5
+    ) -> list[Memory]:
+        """Get memories with low confidence scores."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM memories 
+                WHERE project_id = ? AND confidence_score < ? AND is_archived = 0
+                ORDER BY confidence_score ASC
+                """,
+                (str(project_id), threshold),
+            )
+            rows = cursor.fetchall()
+            return [self._row_to_memory(row) for row in rows]
+

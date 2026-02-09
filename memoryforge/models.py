@@ -62,6 +62,9 @@ class Memory(BaseModel):
     is_archived: bool = False  # True if consolidated into another memory
     consolidated_into: Optional[UUID] = None  # Target memory ID
     
+    # v3: Confidence scoring
+    confidence_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    
     class Config:
         from_attributes = True
 
@@ -154,3 +157,65 @@ class CommitInfo(BaseModel):
     author: str
     date: datetime
     files_changed: list[str] = Field(default_factory=list)
+
+
+# ============================================================================
+# v3 Models
+# ============================================================================
+
+class RelationType(str, Enum):
+    """Types of memory-to-memory relationships."""
+    
+    CAUSED_BY = "caused_by"       # This memory was caused by another
+    SUPERSEDES = "supersedes"     # This memory replaces another
+    RELATES_TO = "relates_to"     # General relationship
+    BLOCKS = "blocks"             # This memory blocks another
+    DEPENDS_ON = "depends_on"     # This memory depends on another
+
+
+class MemoryRelation(BaseModel):
+    """Links between memories (v3: Graph Memory)."""
+    
+    id: UUID = Field(default_factory=uuid4)
+    source_memory_id: UUID
+    target_memory_id: UUID
+    relation_type: RelationType
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_by: Optional[str] = None  # 'human' or 'git-derived'
+    
+    class Config:
+        from_attributes = True
+
+
+class ConflictResolution(str, Enum):
+    """How a sync conflict was resolved."""
+    
+    LOCAL_WINS = "local_wins"
+    REMOTE_WINS = "remote_wins"
+    MANUAL = "manual"
+    MERGED = "merged"
+
+
+class ConflictLog(BaseModel):
+    """Logs sync conflicts and their resolutions (v3)."""
+    
+    id: UUID = Field(default_factory=uuid4)
+    memory_id: UUID
+    local_content: Optional[str] = None
+    remote_content: Optional[str] = None
+    resolution: ConflictResolution
+    resolved_at: datetime = Field(default_factory=datetime.utcnow)
+    resolved_by: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+
+
+class CrossProjectSuggestion(BaseModel):
+    """Suggestion from cross-project reasoning (v3)."""
+    
+    source_project_id: UUID
+    source_project_name: str
+    source_memory: Memory
+    similarity_score: float
+    suggestion: str  # Why this might be relevant

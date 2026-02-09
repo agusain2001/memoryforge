@@ -170,11 +170,12 @@ class RetrievalEngine:
         self,
         results: list[dict],
         recency_weight: float = 0.1,
+        confidence_weight: float = 0.1,  # v3: confidence scoring
     ) -> list[dict]:
         """
-        Re-rank results with recency boost.
+        Re-rank results with recency and confidence boosts.
         
-        More recent memories get a slight boost to their score.
+        More recent and higher-confidence memories get boosted scores.
         This provides a deterministic tie-breaker.
         """
         now = datetime.utcnow()
@@ -191,8 +192,12 @@ class RetrievalEngine:
             # Apply type priority boost
             type_boost = self._get_type_priority(memory.type) * 0.05
             
+            # v3: Apply confidence boost
+            # High confidence memories get boosted, low confidence get penalized
+            confidence_boost = (memory.confidence_score - 0.5) * confidence_weight
+            
             # Combined score
-            result["score"] = min(1.0, base_score + recency_boost + type_boost)
+            result["score"] = min(1.0, base_score + recency_boost + type_boost + confidence_boost)
         
         # Sort by adjusted score (descending), then by created_at (descending) as tie-breaker
         results.sort(

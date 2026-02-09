@@ -1429,8 +1429,225 @@ def sync_status(ctx: click.Context) -> None:
 
 
 # ============================================================================
+# v3 Commands: Share Memory
+# ============================================================================
+
+@main.group()
+@click.pass_context
+def share(ctx: click.Context) -> None:
+    """Share memories with team (v3)."""
+    pass
+
+
+@share.command("memory")
+@click.argument("memory_id")
+@click.option("--with", "share_with", default="team", help="Share target (default: team)")
+@click.option("--note", "-n", help="Add a note for recipients")
+@click.pass_context
+def share_memory(ctx: click.Context, memory_id: str, share_with: str, note: str) -> None:
+    """Share a specific memory with the team."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    if not config.sync_path or not config.sync_key:
+        console.print("[red]Sync not initialized.[/red]")
+        console.print("Run: [cyan]memoryforge sync init --path <sync-dir>[/cyan]")
+        return
+    
+    try:
+        uid = UUID(memory_id)
+    except ValueError:
+        console.print(f"[red]Invalid memory ID: {memory_id}[/red]")
+        sys.exit(1)
+    
+    memory = db.get_memory(uid)
+    if not memory:
+        console.print(f"[red]Memory not found: {memory_id}[/red]")
+        sys.exit(1)
+    
+    from memoryforge.sync.encryption import EncryptionLayer, EncryptionError
+    from memoryforge.sync.local_file_adapter import LocalFileAdapter
+    import json
+    
+    try:
+        encryption = EncryptionLayer(config.sync_key)
+        adapter = LocalFileAdapter(config.sync_path)
+        
+        # Create share package
+        share_data = {
+            "id": str(memory.id),
+            "content": memory.content,
+            "type": memory.type.value,
+            "source": memory.source.value,
+            "project_id": str(memory.project_id),
+            "created_at": memory.created_at.isoformat(),
+            "confirmed": memory.confirmed,
+            "metadata": memory.metadata,
+            "confidence_score": memory.confidence_score,
+            "shared_by": share_with,
+            "shared_at": datetime.utcnow().isoformat(),
+            "note": note,
+        }
+        
+        # Encrypt and save
+        encrypted = encryption.encrypt(json.dumps(share_data))
+        share_filename = f"shared_{str(memory.id)[:8]}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        adapter.write(share_filename, encrypted)
+        
+        console.print(f"[green]✓ Shared memory with {share_with}[/green]")
+        console.print(f"  Memory: {memory.content[:60]}...")
+        console.print(f"  File: {share_filename}")
+        if note:
+            console.print(f"  Note: {note}")
+        
+    except (ImportError, EncryptionError) as e:
+        console.print(f"[red]Share failed: {e}[/red]")
+        if isinstance(e, ImportError):
+            console.print("Try: pip install memoryforge[sync]")
+
+
+@share.command("list")
+@click.pass_context
+def share_list(ctx: click.Context) -> None:
+    """List shared memories in sync folder."""
+    config: Config = ctx.obj["config"]
+    
+    if not config.sync_path or not config.sync_key:
+        console.print("[red]Sync not initialized.[/red]")
+        console.print("Run: [cyan]memoryforge sync init --path <sync-dir>[/cyan]")
+        return
+    
+    if not config.sync_path.exists():
+        console.print("[yellow]Sync directory does not exist.[/yellow]")
+        return
+    
+    from memoryforge.sync.encryption import EncryptionLayer, EncryptionError
+    from memoryforge.sync.local_file_adapter import LocalFileAdapter
+    import json
+    
+    try:
+        encryption = EncryptionLayer(config.sync_key)
+        adapter = LocalFileAdapter(config.sync_path)
+        
+        shared_files = list(config.sync_path.glob("shared_*.json"))
+        
+        if not shared_files:
+            console.print("[dim]No shared memories found.[/dim]")
+            return
+        
+        table = Table(title="Shared Memories")
+        table.add_column("Memory ID", style="cyan", width=10)
+        table.add_column("Content", width=35)
+        table.add_column("Shared At", width=16)
+        table.add_column("Note", width=20)
+        
+        for file_path in shared_files[:20]:
+            try:
+                encrypted = adapter.read(file_path.name)
+                decrypted = encryption.decrypt(encrypted)
+                data = json.loads(decrypted)
+                
+                table.add_row(
+                    data.get("id", "?")[:8] + "...",
+                    (data.get("content", "")[:33] + "...") if len(data.get("content", "")) > 35 else data.get("content", ""),
+                    data.get("shared_at", "?")[:16],
+                    (data.get("note", "") or "-")[:18],
+                )
+            except Exception:
+                continue
+        
+        console.print(table)
+        console.print(f"\n[dim]Total: {len(shared_files)} shared files[/dim]")
+        
+    except (ImportError, EncryptionError) as e:
+        console.print(f"[red]Failed to list shares: {e}[/red]")
+
+
+@share.command("import")
+@click.argument("filename")
+@click.pass_context
+def share_import(ctx: click.Context, filename: str) -> None:
+    """Import a shared memory into your project."""
+    config: Config = ctx.obj["config"]
+    db, qdrant, project_id = ensure_initialized(config)
+    
+    if not config.sync_path or not config.sync_key:
+        console.print("[red]Sync not initialized.[/red]")
+        return
+    
+    from memoryforge.sync.encryption import EncryptionLayer, EncryptionError
+    from memoryforge.sync.local_file_adapter import LocalFileAdapter
+    from memoryforge.core.embedding_factory import create_embedding_service
+    import json
+    
+    try:
+        encryption = EncryptionLayer(config.sync_key)
+        adapter = LocalFileAdapter(config.sync_path)
+        
+        if not adapter.exists(filename):
+            console.print(f"[red]File not found: {filename}[/red]")
+            return
+        
+        encrypted = adapter.read(filename)
+        decrypted = encryption.decrypt(encrypted)
+        data = json.loads(decrypted)
+        
+        console.print(f"[bold]Importing shared memory:[/bold]")
+        console.print(f"  Content: {data.get('content', '')[:60]}...")
+        console.print(f"  Type: {data.get('type')}")
+        console.print(f"  Original project: {data.get('project_id', 'unknown')[:8]}...")
+        if data.get("note"):
+            console.print(f"  Note: {data.get('note')}")
+        
+        if not Confirm.ask("Import this memory to current project?"):
+            return
+        
+        # Create new memory in current project
+        from memoryforge.models import Memory, MemoryType, MemorySource
+        
+        new_memory = Memory(
+            content=data["content"],
+            type=MemoryType(data["type"]),
+            source=MemorySource.MANUAL,  # Mark as manual since it's imported
+            project_id=project_id,
+            confirmed=False,  # Require confirmation for imported memories
+            metadata={
+                **data.get("metadata", {}),
+                "imported_from": data.get("project_id"),
+                "original_id": data.get("id"),
+                "import_note": data.get("note"),
+            },
+            confidence_score=data.get("confidence_score", 0.8),  # Slightly lower for imports
+        )
+        
+        # Save to SQLite
+        db.create_memory(new_memory)
+        
+        # Generate embedding and index
+        embedding_service = create_embedding_service(config)
+        embedding = embedding_service.generate(new_memory.content)
+        vector_id = qdrant.upsert(
+            memory_id=str(new_memory.id),
+            embedding=embedding,
+            metadata={
+                "type": new_memory.type.value,
+                "project_id": str(project_id),
+            }
+        )
+        db.save_embedding_reference(new_memory.id, vector_id)
+        
+        console.print(f"\n[green]✓ Imported memory[/green]")
+        console.print(f"  New ID: {new_memory.id}")
+        console.print(f"  [dim]Run 'memoryforge confirm {new_memory.id}' to confirm[/dim]")
+        
+    except (ImportError, EncryptionError) as e:
+        console.print(f"[red]Import failed: {e}[/red]")
+
+
+# ============================================================================
 # Reindex Command
 # ============================================================================
+
 
 @main.command("reindex")
 @click.option("--force", is_flag=True, help="Skip confirmation prompt")
@@ -1496,6 +1713,363 @@ def reindex(ctx: click.Context, force: bool) -> None:
     if error_count > 0:
         console.print(f"[yellow]⚠ {error_count} memories failed[/yellow]")
 
-
 if __name__ == "__main__":
     main()
+
+
+# ============================================================================
+# v3 Commands: Graph Memory
+# ============================================================================
+
+@main.group()
+@click.pass_context
+def graph(ctx: click.Context) -> None:
+    """Memory relationship graph commands (v3)."""
+    pass
+
+
+@graph.command("view")
+@click.argument("memory_id")
+@click.pass_context
+def graph_view(ctx: click.Context, memory_id: str) -> None:
+    """View memory relationships (graph view)."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.graph_builder import GraphBuilder
+    
+    try:
+        uid = UUID(memory_id)
+    except ValueError:
+        console.print(f"[red]Invalid memory ID: {memory_id}[/red]")
+        sys.exit(1)
+    
+    graph_builder = GraphBuilder(db)
+    
+    try:
+        view = graph_builder.get_graph_view(uid)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+    
+    memory = view["memory"]
+    
+    # Central memory
+    console.print(Panel.fit(
+        f"[bold]Content:[/bold] {memory.content[:200]}...\n"
+        f"[bold]Type:[/bold] {memory.type.value}\n"
+        f"[bold]Confidence:[/bold] {memory.confidence_score:.2f}\n"
+        f"[bold]Created:[/bold] {memory.created_at.strftime('%Y-%m-%d %H:%M')}",
+        title=f"Memory {str(memory.id)[:8]}...",
+        border_style="cyan",
+    ))
+    
+    # Incoming relations
+    if view["incoming"]:
+        console.print(f"\n[bold green]← Incoming ({len(view['incoming'])}):[/bold green]")
+        for item in view["incoming"]:
+            m = item["memory"]
+            console.print(f"  • [{item['relation_type']}] {str(m.id)[:8]}... - {m.content[:50]}...")
+    
+    # Outgoing relations
+    if view["outgoing"]:
+        console.print(f"\n[bold blue]→ Outgoing ({len(view['outgoing'])}):[/bold blue]")
+        for item in view["outgoing"]:
+            m = item["memory"]
+            console.print(f"  • [{item['relation_type']}] {str(m.id)[:8]}... - {m.content[:50]}...")
+    
+    # Causality chain
+    if view["causality_chain"]:
+        console.print(f"\n[bold yellow]⚡ Causality Chain ({len(view['causality_chain'])}):[/bold yellow]")
+        for i, m in enumerate(view["causality_chain"]):
+            console.print(f"  {i+1}. {str(m.id)[:8]}... - {m.content[:60]}...")
+    
+    if not view["incoming"] and not view["outgoing"] and not view["causality_chain"]:
+        console.print("\n[dim]No relationships found for this memory.[/dim]")
+        console.print("[dim]Link memories with: memoryforge graph link <source_id> <target_id> --type relates_to[/dim]")
+
+
+@graph.command("link")
+@click.argument("source_id")
+@click.argument("target_id")
+@click.option("--type", "-t", "relation_type", default="relates_to",
+              type=click.Choice(["caused_by", "supersedes", "relates_to", "blocks", "depends_on"]),
+              help="Type of relationship")
+@click.pass_context
+def graph_link(ctx: click.Context, source_id: str, target_id: str, relation_type: str) -> None:
+    """Link two memories with a relationship."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.graph_builder import GraphBuilder
+    from memoryforge.models import RelationType
+    
+    try:
+        source_uid = UUID(source_id)
+        target_uid = UUID(target_id)
+    except ValueError as e:
+        console.print(f"[red]Invalid memory ID: {e}[/red]")
+        sys.exit(1)
+    
+    graph_builder = GraphBuilder(db)
+    rel_type = RelationType(relation_type)
+    
+    try:
+        relation = graph_builder.link_memories(
+            source_id=source_uid,
+            target_id=target_uid,
+            relation_type=rel_type,
+            created_by="human",
+        )
+        console.print(f"[green]✓ Created relationship: {source_id[:8]}... --[{relation_type}]--> {target_id[:8]}...[/green]")
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+# ============================================================================
+# v3 Commands: Conflict Management
+# ============================================================================
+
+@main.group()
+@click.pass_context
+def conflicts(ctx: click.Context) -> None:
+    """Sync conflict management commands (v3)."""
+    pass
+
+
+@conflicts.command("list")
+@click.option("--memory-id", "-m", help="Filter by memory ID")
+@click.pass_context
+def conflicts_list(ctx: click.Context, memory_id: str) -> None:
+    """List sync conflict history."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.conflict_resolver import ConflictResolver
+    
+    resolver = ConflictResolver(db)
+    
+    filter_id = None
+    if memory_id:
+        try:
+            filter_id = UUID(memory_id)
+        except ValueError:
+            console.print(f"[red]Invalid memory ID: {memory_id}[/red]")
+            sys.exit(1)
+    
+    conflicts = resolver.list_conflicts(filter_id)
+    
+    if not conflicts:
+        console.print("[dim]No sync conflicts recorded.[/dim]")
+        return
+    
+    table = Table(title="Sync Conflict History")
+    table.add_column("Memory", style="cyan", width=10)
+    table.add_column("Resolution", style="yellow", width=12)
+    table.add_column("Resolved At", width=16)
+    table.add_column("Resolved By", width=10)
+    
+    for conflict in conflicts[:20]:
+        table.add_row(
+            str(conflict.memory_id)[:8] + "...",
+            conflict.resolution.value,
+            conflict.resolved_at.strftime("%Y-%m-%d %H:%M"),
+            conflict.resolved_by or "system",
+        )
+    
+    console.print(table)
+    
+    if len(conflicts) > 20:
+        console.print(f"\n[dim]Showing 20 of {len(conflicts)} conflicts[/dim]")
+
+
+@conflicts.command("show")
+@click.argument("memory_id")
+@click.pass_context
+def conflicts_show(ctx: click.Context, memory_id: str) -> None:
+    """Show detailed conflict history for a memory."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.conflict_resolver import ConflictResolver
+    
+    try:
+        uid = UUID(memory_id)
+    except ValueError:
+        console.print(f"[red]Invalid memory ID: {memory_id}[/red]")
+        sys.exit(1)
+    
+    resolver = ConflictResolver(db)
+    conflicts = resolver.list_conflicts(uid)
+    
+    if not conflicts:
+        console.print("[dim]No conflicts recorded for this memory.[/dim]")
+        return
+    
+    for i, conflict in enumerate(conflicts, 1):
+        console.print(Panel(
+            f"[bold]Resolution:[/bold] {conflict.resolution.value}\n"
+            f"[bold]Resolved At:[/bold] {conflict.resolved_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"[bold]Resolved By:[/bold] {conflict.resolved_by or 'system'}\n\n"
+            f"[bold]Local Content:[/bold]\n{conflict.local_content[:200] if conflict.local_content else 'N/A'}...\n\n"
+            f"[bold]Remote Content:[/bold]\n{conflict.remote_content[:200] if conflict.remote_content else 'N/A'}...",
+            title=f"Conflict {i}",
+            border_style="yellow",
+        ))
+
+
+# ============================================================================
+# v3 Commands: Confidence Scoring
+# ============================================================================
+
+@main.group()
+@click.pass_context
+def confidence(ctx: click.Context) -> None:
+    """Memory confidence scoring commands (v3)."""
+    pass
+
+
+@confidence.command("show")
+@click.argument("memory_id")
+@click.pass_context
+def confidence_show(ctx: click.Context, memory_id: str) -> None:
+    """Show confidence score details for a memory."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.confidence_scorer import ConfidenceScorer
+    
+    try:
+        uid = UUID(memory_id)
+    except ValueError:
+        console.print(f"[red]Invalid memory ID: {memory_id}[/red]")
+        sys.exit(1)
+    
+    scorer = ConfidenceScorer(db)
+    
+    try:
+        details = scorer.get_confidence_details(uid)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+    
+    breakdown = details["breakdown"]
+    
+    console.print(Panel.fit(
+        f"[bold]Current Score:[/bold] {details['current_score']:.2f}\n"
+        f"[bold]Calculated Score:[/bold] {details['calculated_score']:.2f}\n\n"
+        f"[bold]Breakdown:[/bold]\n"
+        f"  • Confirmation: {breakdown['confirmation']['score']:.2f} "
+        f"({'✓' if breakdown['confirmation']['confirmed'] else '✗'})\n"
+        f"  • Recency: {breakdown['recency']['score']:.2f}\n"
+        f"  • Usage: {breakdown['usage']['score']:.2f}\n"
+        f"  • Conflicts: {breakdown['conflicts']['score']:.2f} "
+        f"({breakdown['conflicts']['conflict_count']} conflicts)",
+        title=f"Confidence: {memory_id[:8]}...",
+        border_style="blue",
+    ))
+
+
+@confidence.command("update")
+@click.argument("memory_id")
+@click.pass_context
+def confidence_update(ctx: click.Context, memory_id: str) -> None:
+    """Recalculate confidence score for a memory."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.confidence_scorer import ConfidenceScorer
+    
+    try:
+        uid = UUID(memory_id)
+    except ValueError:
+        console.print(f"[red]Invalid memory ID: {memory_id}[/red]")
+        sys.exit(1)
+    
+    scorer = ConfidenceScorer(db)
+    
+    try:
+        old_memory = db.get_memory(uid)
+        old_score = old_memory.confidence_score if old_memory else 1.0
+        
+        new_score = scorer.update_score(uid)
+        
+        console.print(f"[green]✓ Updated confidence score[/green]")
+        console.print(f"  Old: {old_score:.2f} → New: {new_score:.2f}")
+        
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+
+
+@confidence.command("low")
+@click.option("--threshold", "-t", default=0.5, help="Confidence threshold")
+@click.pass_context
+def confidence_low(ctx: click.Context, threshold: float) -> None:
+    """List memories with low confidence scores."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.confidence_scorer import ConfidenceScorer
+    
+    scorer = ConfidenceScorer(db)
+    low_memories = scorer.get_low_confidence(project_id, threshold)
+    
+    if not low_memories:
+        console.print(f"[dim]No memories with confidence below {threshold}[/dim]")
+        return
+    
+    table = Table(title=f"Low Confidence Memories (< {threshold})")
+    table.add_column("ID", style="cyan", width=10)
+    table.add_column("Score", justify="right", width=6)
+    table.add_column("Content", width=40)
+    table.add_column("Type", width=10)
+    
+    for memory in low_memories[:20]:
+        table.add_row(
+            str(memory.id)[:8] + "...",
+            f"{memory.confidence_score:.2f}",
+            memory.content[:38] + "..." if len(memory.content) > 40 else memory.content,
+            memory.type.value,
+        )
+    
+    console.print(table)
+    
+    console.print(f"\n[dim]Update scores with: memoryforge confidence update <id>[/dim]")
+
+
+@confidence.command("refresh")
+@click.pass_context
+def confidence_refresh(ctx: click.Context) -> None:
+    """Recalculate confidence scores for all memories in the project."""
+    config: Config = ctx.obj["config"]
+    db, _, project_id = ensure_initialized(config)
+    
+    from memoryforge.core.confidence_scorer import ConfidenceScorer
+    
+    scorer = ConfidenceScorer(db)
+    
+    if not Confirm.ask("Recalculate confidence for all memories?"):
+        return
+    
+    with console.status("[bold green]Recalculating confidence scores..."):
+        results = scorer.batch_update_scores(project_id)
+    
+    console.print(f"[green]✓ Updated {len(results)} memory scores[/green]")
+    
+    # Show distribution
+    low = sum(1 for s in results.values() if s < 0.5)
+    medium = sum(1 for s in results.values() if 0.5 <= s < 0.8)
+    high = sum(1 for s in results.values() if s >= 0.8)
+    
+    console.print(f"\n[bold]Score Distribution:[/bold]")
+    console.print(f"  [red]Low (<0.5):[/red] {low}")
+    console.print(f"  [yellow]Medium (0.5-0.8):[/yellow] {medium}")
+    console.print(f"  [green]High (>=0.8):[/green] {high}")
+
+
+# Re-register main guard at end
+if __name__ == "__main__":
+    main()
+

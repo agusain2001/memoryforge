@@ -1,8 +1,9 @@
 # MemoryForge
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/tests-114%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-111%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-3.0-purple)
 
 > **Local-first memory layer for AI coding assistants**
 
@@ -21,6 +22,9 @@ MemoryForge provides persistent, semantic memory for AI pair programmers. Store 
 | **Staleness Tracking** | Mark outdated memories, filter from search |
 | **Git Integration** | Link memories to commits |
 | **Team Sync** | Encrypted sync to shared storage |
+| **Graph Memory** | Memory-to-memory relationships (v3) |
+| **Confidence Scoring** | Trust scores for prioritized retrieval (v3) |
+| **Conflict Resolution** | Sync conflict detection and logging (v3) |
 | **MCP Server** | IDE integration via Model Context Protocol |
 
 ---
@@ -147,6 +151,40 @@ memoryforge sync status
 
 ```bash
 memoryforge migrate [--rollback] [--backup-file FILE]
+```
+
+### Graph Memory (v3)
+
+```bash
+memoryforge graph view MEMORY_ID           # View memory relationships
+memoryforge graph link SRC_ID TGT_ID       # Create relationship
+  -t, --type [caused_by|supersedes|relates_to|blocks|depends_on]
+```
+
+### Conflict Management (v3)
+
+```bash
+memoryforge conflicts list [--memory-id ID]  # List sync conflicts
+memoryforge conflicts show MEMORY_ID         # Detailed conflict history
+```
+
+### Confidence Scoring (v3)
+
+```bash
+memoryforge confidence show MEMORY_ID      # View confidence breakdown
+memoryforge confidence update MEMORY_ID    # Recalculate score
+memoryforge confidence low [--threshold N] # List low-confidence memories
+memoryforge confidence refresh             # Batch update all scores
+```
+
+### Memory Sharing (v3)
+
+```bash
+memoryforge share memory MEMORY_ID          # Share a memory with team
+  --with TEAM                               # Share target (default: team)
+  -n, --note TEXT                           # Add a note for recipients
+memoryforge share list                      # List shared memories
+memoryforge share import FILENAME           # Import shared memory
 ```
 
 ---

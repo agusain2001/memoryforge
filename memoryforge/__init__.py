@@ -9,7 +9,7 @@ from memoryforge.models import Memory, MemoryType, MemorySource, SearchResult, P
 from memoryforge.core.memory_manager import MemoryManager
 from memoryforge.config import Config
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __all__ = [
     "Memory",
     "MemoryType", 

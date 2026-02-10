@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-8%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.0.1-purple)
+![Version](https://img.shields.io/badge/version-1.0.2-purple)
 
 > **Local-first memory layer for AI coding assistants**
 

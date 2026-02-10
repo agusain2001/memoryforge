@@ -164,22 +164,27 @@ class QdrantStore:
                 ]
             )
         
-        results = self.client.search(
+        # Use query_points instead of search (qdrant-client 1.16+ API)
+        results = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_embedding,
+            query=query_embedding,
             query_filter=query_filter,
             limit=limit,
             score_threshold=min_score,
         )
         
+        # Handle the new response format
+        # query_points returns a QueryResponse with .points attribute
+        points = results.points if hasattr(results, 'points') else results
+        
         return [
             {
-                "memory_id": result.payload["memory_id"],
-                "score": result.score,
-                "memory_type": result.payload.get("memory_type"),
-                "created_at": result.payload.get("created_at"),
+                "memory_id": point.payload["memory_id"],
+                "score": point.score,
+                "memory_type": point.payload.get("memory_type"),
+                "created_at": point.payload.get("created_at"),
             }
-            for result in results
+            for point in points
         ]
     
     def get_count(self) -> int:

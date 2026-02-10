@@ -1294,18 +1294,31 @@ def sync(ctx: click.Context) -> None:
 @sync.command("init")
 @click.option("--path", "-p", required=True, help="Path for sync storage (e.g. shared drive, git repo)")
 @click.option("--key", "-k", help="Existing encryption key (if joining a team)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts (for automated workflows)")
 @click.pass_context
-def sync_init(ctx: click.Context, path: str, key: str) -> None:
+def sync_init(ctx: click.Context, path: str, key: str, yes: bool) -> None:
     """Initialize team sync."""
     config: Config = ctx.obj["config"]
+    
+    # Early dependency check
+    try:
+        import cryptography
+    except ImportError:
+        console.print("[red]✗ cryptography package is required for sync features.[/red]")
+        console.print("\n[bold]Installation:[/bold]")
+        console.print("  [cyan]pip install memoryforge[sync][/cyan]")
+        console.print("\n[dim]This will install cryptography and gitpython dependencies.[/dim]")
+        sys.exit(1)
     
     from memoryforge.sync.encryption import EncryptionLayer
     
     # Verify path
     sync_path = Path(path).resolve()
     if not sync_path.exists():
-        if Confirm.ask(f"Create sync directory at {sync_path}?"):
+        # Auto-create if --yes flag is set, otherwise ask for confirmation
+        if yes or Confirm.ask(f"Create sync directory at {sync_path}?"):
             sync_path.mkdir(parents=True, exist_ok=True)
+            console.print(f"[dim]Created directory: {sync_path}[/dim]")
         else:
             console.print("[red]Aborted.[/red]")
             return
@@ -1313,15 +1326,16 @@ def sync_init(ctx: click.Context, path: str, key: str) -> None:
     # Handle key
     if key:
         encryption_key = key
+        console.print("[dim]Using provided encryption key.[/dim]")
     else:
         # Generate new key
         try:
             encryption_key = EncryptionLayer.generate_key()
             console.print("[green]Generated new encryption key.[/green]")
-        except ImportError:
-            console.print("[red]cryptography package required.[/red]")
-            console.print("Run: pip install memoryforge[sync]")
-            return
+        except ImportError as e:
+            console.print(f"[red]Failed to generate encryption key: {e}[/red]")
+            console.print("Run: [cyan]pip install memoryforge[sync][/cyan]")
+            sys.exit(1)
     
     # Save config
     config.sync_path = sync_path
@@ -1336,7 +1350,8 @@ def sync_init(ctx: click.Context, path: str, key: str) -> None:
     if not key:
         console.print(f"\n[bold yellow]IMPORTANT: Save this key safely![/bold yellow]")
         console.print(f"[white on black] {encryption_key} [/white on black]")
-        console.print("Share this key with your team members so they can syncing.")
+        console.print("Share this key with your team members so they can sync.")
+
 
 
 @sync.command("push")

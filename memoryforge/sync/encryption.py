@@ -46,8 +46,9 @@ class EncryptionLayer:
             import cryptography
         except ImportError:
             raise ImportError(
-                "cryptography package is required for sync encryption. "
-                "Install it with: pip install memoryforge[sync]"
+                "The 'cryptography' package is required for sync encryption.\n"
+                "Install it with: pip install memoryforge[sync]\n"
+                "This will install both cryptography and gitpython dependencies."
             )
     
     def encrypt(self, data: str) -> str:

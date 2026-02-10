@@ -152,11 +152,21 @@ memoryforge git activity [--days N]
 
 ### Team Sync
 
+> **Note:** Team sync requires the `cryptography` package. Install with: `pip install memoryforge[sync]`
+
 ```bash
-memoryforge sync init --path ./shared-folder
-memoryforge sync push [--force]
-memoryforge sync pull
-memoryforge sync status
+memoryforge sync init --path ./shared-folder  # Initialize sync
+  -y, --yes                                   # Skip prompts (for automation)
+  -k, --key TEXT                              # Use existing encryption key
+
+memoryforge sync push [--force]               # Push local memories
+memoryforge sync pull                         # Pull remote memories
+memoryforge sync status                       # Show sync configuration
+```
+
+**Automated Workflows:** Use `--yes` flag to skip confirmation prompts:
+```bash
+memoryforge sync init --path "$SYNC_DIR" --yes
 ```
 
 ### Database Migration
@@ -263,6 +273,7 @@ memoryforge serve
 | `Memory not found in search` | Qdrant indexing failed | `memoryforge confirm <id> --force` |
 | `database is locked` | Multiple processes | Ensure single CLI/MCP instance |
 | `SyncConflictError` | Concurrent team edits | `memoryforge sync push --force` |
+| `cryptography package required` | Missing sync dependencies | `pip install memoryforge[sync]` |
 
 ---
 

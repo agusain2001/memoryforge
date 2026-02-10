@@ -21,6 +21,7 @@ v2 Commands:
 import asyncio
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from uuid import UUID
@@ -1361,9 +1362,15 @@ def sync_push(ctx: click.Context, force: bool) -> None:
         manager = SyncManager(db, adapter, encryption, project_id)
         
         with console.status("[bold green]Encrypting and pushing memories..."):
-            count = manager.export_memories(force=force)
-            
-        console.print(f"[green]✓ Pushed {count} memories[/green]")
+            result = manager.export_memories(force=force)
+        
+        if result.conflicts:
+            for conflict in result.conflicts:
+                console.print(f"[yellow]⚠ Conflict: {conflict}[/yellow]")
+        if result.errors:
+            for error in result.errors:
+                console.print(f"[red]✗ Error: {error}[/red]")
+        console.print(f"[green]✓ Pushed {result.exported} memories[/green]")
         
     except (ImportError, EncryptionError) as e:
         console.print(f"[red]Sync failed: {e}[/red]")
@@ -1393,9 +1400,15 @@ def sync_pull(ctx: click.Context) -> None:
         manager = SyncManager(db, adapter, encryption, project_id)
         
         with console.status("[bold green]Pulling and decrypting memories..."):
-            count = manager.import_memories()
-            
-        console.print(f"[green]✓ Pulled {count} new/updated memories[/green]")
+            result = manager.import_memories()
+        
+        if result.conflicts:
+            for conflict in result.conflicts:
+                console.print(f"[yellow]⚠ Conflict: {conflict}[/yellow]")
+        if result.errors:
+            for error in result.errors:
+                console.print(f"[red]✗ Error: {error}[/red]")
+        console.print(f"[green]✓ Pulled {result.imported} new/updated memories[/green]")
         
     except (ImportError, EncryptionError) as e:
         console.print(f"[red]Sync failed: {e}[/red]")
@@ -1492,7 +1505,7 @@ def share_memory(ctx: click.Context, memory_id: str, share_with: str, note: str)
         # Encrypt and save
         encrypted = encryption.encrypt(json.dumps(share_data))
         share_filename = f"shared_{str(memory.id)[:8]}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
-        adapter.write(share_filename, encrypted)
+        adapter.write_file(share_filename, encrypted)
         
         console.print(f"[green]✓ Shared memory with {share_with}[/green]")
         console.print(f"  Memory: {memory.content[:60]}...")
@@ -1543,7 +1556,7 @@ def share_list(ctx: click.Context) -> None:
         
         for file_path in shared_files[:20]:
             try:
-                encrypted = adapter.read(file_path.name)
+                encrypted = adapter.read_file(file_path.name)
                 decrypted = encryption.decrypt(encrypted)
                 data = json.loads(decrypted)
                 
@@ -1584,11 +1597,10 @@ def share_import(ctx: click.Context, filename: str) -> None:
         encryption = EncryptionLayer(config.sync_key)
         adapter = LocalFileAdapter(config.sync_path)
         
-        if not adapter.exists(filename):
+        encrypted = adapter.read_file(filename)
+        if encrypted is None:
             console.print(f"[red]File not found: {filename}[/red]")
             return
-        
-        encrypted = adapter.read(filename)
         decrypted = encryption.decrypt(encrypted)
         data = json.loads(decrypted)
         
